@@ -1,0 +1,60 @@
+name: VidNest Stream Extractor
+
+on:
+  workflow_dispatch:
+    inputs:
+      tmdb_id:
+        description: "TMDB ID (e.g. 254)"
+        required: true
+        default: "254"
+      media_type:
+        description: "Type: movie or tv"
+        required: true
+        default: "movie"
+        type: choice
+        options:
+          - movie
+          - tv
+      season:
+        description: "Season number (TV only)"
+        required: false
+        default: "1"
+      episode:
+        description: "Episode number (TV only)"
+        required: false
+        default: "1"
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run extractor
+        run: |
+          python vidnest_extract.py \
+            --tmdb_id "${{ github.event.inputs.tmdb_id }}" \
+            --media_type "${{ github.event.inputs.media_type }}" \
+            --season "${{ github.event.inputs.season }}" \
+            --episode "${{ github.event.inputs.episode }}" \
+            --output results.json
+
+      - name: Show results
+        run: cat results.json
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: streams-${{ github.event.inputs.media_type }}-${{ github.event.inputs.tmdb_id }}
+          path: results.json
+          retention-days: 7
