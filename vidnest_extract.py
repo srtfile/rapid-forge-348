@@ -1,7 +1,3 @@
-#!/usr/bin/env python3
-"""
-VidNest stream extractor - all 10 servers, streams only.
-"""
 
 import argparse
 import base64
@@ -53,6 +49,44 @@ FETCH_HEADERS = {
 
 SUBTITLE_HOSTS = ("opensubtitles.org", "opensubtitles.com", "wyzie.io", "vdrk.site")
 SUBTITLE_EXTS  = (".vtt", ".srt", ".ass", ".ssa")
+
+# Rotating residential proxies — tried in order, next used if one fails
+PROXY_LIST = [
+    ("31.59.20.176",    6754, "ygxmhkcc", "n3batopqanpg"),
+    ("31.56.127.193",   7684, "ygxmhkcc", "n3batopqanpg"),
+    ("45.38.107.97",    6014, "ygxmhkcc", "n3batopqanpg"),
+    ("38.154.203.95",   5863, "ygxmhkcc", "n3batopqanpg"),
+    ("198.105.121.200", 6462, "ygxmhkcc", "n3batopqanpg"),
+    ("64.137.96.74",    6641, "ygxmhkcc", "n3batopqanpg"),
+    ("198.23.243.226",  6361, "ygxmhkcc", "n3batopqanpg"),
+    ("38.154.185.97",   6370, "ygxmhkcc", "n3batopqanpg"),
+    ("142.111.67.146",  5611, "ygxmhkcc", "n3batopqanpg"),
+    ("191.96.254.138",  6185, "ygxmhkcc", "n3batopqanpg"),
+]
+
+
+def make_proxy_dict(host, port, user, password):
+    url = f"http://{user}:{password}@{host}:{port}"
+    return {"http": url, "https": url}
+
+
+def fetch_with_fallback(url: str) -> tuple:
+    """Try each proxy in order. Returns (response, proxy_used) or raises."""
+    last_err = None
+    for host, port, user, pw in PROXY_LIST:
+        proxies = make_proxy_dict(host, port, user, pw)
+        try:
+            r = requests.get(url, headers=FETCH_HEADERS, proxies=proxies, timeout=12)
+            if r.status_code == 200:
+                return r, f"{host}:{port}"
+            if r.status_code not in (502, 503, 407, 429):
+                # Definitive error (404, etc) — no point retrying with another proxy
+                return r, f"{host}:{port}"
+            last_err = f"HTTP {r.status_code}"
+        except Exception as e:
+            last_err = str(e)
+            continue
+    raise Exception(f"All proxies failed. Last error: {last_err}")
 
 
 def decode(data: str) -> dict:
@@ -114,11 +148,9 @@ def get_url(item: dict) -> str:
 
 def walk(obj):
     if isinstance(obj, dict):
-        for v in obj.values():
-            yield from walk(v)
+        for v in obj.values(): yield from walk(v)
     elif isinstance(obj, list):
-        for v in obj:
-            yield from walk(v)
+        for v in obj: yield from walk(v)
     else:
         yield obj
 
@@ -128,8 +160,7 @@ def extract_streams(payload: dict, server: str) -> list:
     raw_urls = []
 
     for scope in ([inner, payload] if inner is not payload else [payload]):
-        if not isinstance(scope, dict):
-            continue
+        if not isinstance(scope, dict): continue
         for src in scope.get("sources") or []:
             if not isinstance(src, dict): continue
             u = get_url(src)
@@ -158,8 +189,7 @@ def extract_streams(payload: dict, server: str) -> list:
 
     out = []
     for raw_url, res in unique:
-        if is_subtitle(raw_url) or is_bare(raw_url):
-            continue
+        if is_subtitle(raw_url) or is_bare(raw_url): continue
         if raw_url.lower().split("?")[0].endswith(".mp4"):
             proxy_url = wrap_worker(raw_url)
         elif server in PROXY_BASES:
@@ -174,6 +204,7 @@ def extract_streams(payload: dict, server: str) -> list:
 def resolve(tmdb_id: int, media_type: str = "movie", season: str = "1", episode: str = "1"):
     print(f"\n{'='*60}", flush=True)
     print(f"  VidNest Extractor  |  ID: {tmdb_id}  |  {media_type}", flush=True)
+    print(f"  Proxies available: {len(PROXY_LIST)}", flush=True)
     print(f"{'='*60}\n", flush=True)
 
     path = f"movie/{tmdb_id}" if media_type == "movie" else f"tv/{tmdb_id}/{season}/{episode}"
@@ -184,20 +215,21 @@ def resolve(tmdb_id: int, media_type: str = "movie", season: str = "1", episode:
         url = f"https://new.vidnest.fun/{backend}/{path}"
         print(f"[{server_name:8}] fetching...", flush=True)
 
-        entry = {"server": server_name, "backend": backend, "status": None, "streams": []}
+        entry = {"server": server_name, "backend": backend, "status": None, "proxy": None, "streams": []}
 
         try:
-            r = requests.get(url, headers=FETCH_HEADERS, timeout=10)
+            r, proxy_used = fetch_with_fallback(url)
             entry["status"] = r.status_code
+            entry["proxy"] = proxy_used
         except Exception as e:
-            print(f"           ✗ {e}\n", flush=True)
+            print(f"           ✗ all proxies failed: {e}\n", flush=True)
             entry["status"] = "error"
             entry["error"] = str(e)
             server_log.append(entry)
             continue
 
         if r.status_code != 200:
-            print(f"           ✗ HTTP {r.status_code}\n", flush=True)
+            print(f"           ✗ HTTP {r.status_code} (via {entry['proxy']})\n", flush=True)
             server_log.append(entry)
             continue
 
@@ -219,7 +251,7 @@ def resolve(tmdb_id: int, media_type: str = "movie", season: str = "1", episode:
             if streams:
                 for s in streams:
                     mtype = detect_type(s["raw_url"])
-                    print(f"           ✓ [{server_name:8}] [{mtype:4}] [{s['resolution']:>7}]", flush=True)
+                    print(f"           ✓ [{server_name:8}] [{mtype:4}] [{s['resolution']:>7}] via {entry['proxy']}", flush=True)
                     print(f"             {s['url']}", flush=True)
                     record = {
                         "server":     server_name,
@@ -227,6 +259,7 @@ def resolve(tmdb_id: int, media_type: str = "movie", season: str = "1", episode:
                         "resolution": s["resolution"],
                         "url":        s["url"],
                         "raw_url":    s["raw_url"],
+                        "proxy":      entry["proxy"],
                     }
                     all_streams.append(record)
                     entry["streams"].append(record)
@@ -261,7 +294,7 @@ if __name__ == "__main__":
     parser.add_argument("--media_type", default="movie")
     parser.add_argument("--season",     default="1")
     parser.add_argument("--episode",    default="1")
-    parser.add_argument("--output",     default=None, help="Save JSON results to this file")
+    parser.add_argument("--output",     default=None)
     args = parser.parse_args()
 
     result = resolve(
